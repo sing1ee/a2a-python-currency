@@ -1,6 +1,31 @@
-
 # 使用 A2A Python SDK 实现 CurrencyAgent
 谷歌官方的[a2a-python](https://github.com/google/a2a-python) SDK最近频繁的更新，我们的教程也需要跟着更新，这篇文章，我们通过 a2a-python sdk的 `0.2.3` 版本，实现一个简单的CurrencyAgent。
+
+## 目录
+- [源码](#源码)
+- [准备](#准备)
+- [详细过程](#详细过程)
+  - [创建项目](#创建项目)
+  - [创建虚拟环境](#创建虚拟环境)
+  - [添加依赖](#添加依赖)
+  - [配置环境变量](#配置环境变量)
+  - [创建 Agent](#创建-agent)
+    - [核心功能](#1-核心功能)
+    - [系统架构](#2-系统架构)
+      - [系统提示词](#21-系统提示词system-prompt)
+      - [主要方法](#22-主要方法)
+    - [工作流程](#3-工作流程)
+    - [响应格式](#4-响应格式)
+    - [错误处理](#5-错误处理)
+  - [测试 Agent](#测试-agent)
+  - [实现 AgentExecutor](#实现-agentexecutor)
+  - [实现 AgentServer](#实现-agentserver)
+    - [AgentSkill](#agentskill)
+    - [AgentCard](#agentcard)
+    - [AgentServer](#agentserver-1)
+  - [运行](#运行)
+    - [运行 Server](#运行-server)
+    - [运行 Client](#运行-client)
 
 ## 源码
 项目的源码在[a2a-python-currency](https://github.com/sing1ee/a2a-python-currency)，欢迎 star 。
