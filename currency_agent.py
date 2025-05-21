@@ -75,7 +75,7 @@ Note: Return the response in the JSON format, only json is allowed.
 
     async def _call_openai(self, messages: List[Dict[str, str]]) -> Dict[str, Any]:
         """Call OpenAI API through OpenRouter."""
-        async with httpx.AsyncClient() as client:
+        async with httpx.AsyncClient(timeout=30.0) as client:
             response = await client.post(
                 f"{self.api_base}/chat/completions",
                 headers={
