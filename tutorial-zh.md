@@ -7,7 +7,7 @@
 
 
 ## 准备
-- uv 0.7.2，用来进行项目管理
+- [uv](https://docs.astral.sh/uv/#installation) 0.7.2，用来进行项目管理
 - Python 3.13+，一定要这个版本以上，a2a-python 的要求
 - openai/openrouter 的 apiKey，baseURL，我使用的是 [OpenRouter](https://openrouter.ai/)，有更多的模型可以选择。
 
@@ -24,8 +24,7 @@ source .venv/bin/activate
 ```
 ## 添加依赖
 ```bash
-uv add a2a-python
-uv add dotenv
+uv add a2a-sdk uvicorn dotenv click
 ```
 ## 配置环境变量
 ```bash
@@ -332,4 +331,443 @@ INFO:httpx:HTTP Request: POST https://openrouter.ai/api/v1/chat/completions "HTT
 INFO:__main__:Response: {'is_task_complete': True, 'require_user_input': False, 'content': "I'm sorry, but I can only assist with currency conversion and exchange rate queries. I cannot provide information about the weather or other unrelated topics. If you have any questions about currency exchange rates or conversions, I'd be happy to help with those."}
 ```
 
-## 
+## 完成 AgentExecutor
+```python
+from currency_agent import CurrencyAgent  # type: ignore[import-untyped]
+
+from a2a.server.agent_execution import AgentExecutor, RequestContext
+from a2a.server.events.event_queue import EventQueue
+from a2a.types import (
+    TaskArtifactUpdateEvent,
+    TaskState,
+    TaskStatus,
+    TaskStatusUpdateEvent,
+)
+from a2a.utils import new_agent_text_message, new_task, new_text_artifact
+
+
+class CurrencyAgentExecutor(AgentExecutor):
+    """Currency AgentExecutor Example."""
+
+    def __init__(self):
+        self.agent = CurrencyAgent()
+
+    async def execute(
+        self,
+        context: RequestContext,
+        event_queue: EventQueue,
+    ) -> None:
+        query = context.get_user_input()
+        task = context.current_task
+
+        if not context.message:
+            raise Exception('No message provided')
+
+        if not task:
+            task = new_task(context.message)
+            event_queue.enqueue_event(task)
+        # invoke the underlying agent, using streaming results
+        async for event in self.agent.stream(query, task.contextId):
+            if event['is_task_complete']:
+                event_queue.enqueue_event(
+                    TaskArtifactUpdateEvent(
+                        append=False,
+                        contextId=task.contextId,
+                        taskId=task.id,
+                        lastChunk=True,
+                        artifact=new_text_artifact(
+                            name='current_result',
+                            description='Result of request to agent.',
+                            text=event['content'],
+                        ),
+                    )
+                )
+                event_queue.enqueue_event(
+                    TaskStatusUpdateEvent(
+                        status=TaskStatus(state=TaskState.completed),
+                        final=True,
+                        contextId=task.contextId,
+                        taskId=task.id,
+                    )
+                )
+            elif event['require_user_input']:
+                event_queue.enqueue_event(
+                    TaskStatusUpdateEvent(
+                        status=TaskStatus(
+                            state=TaskState.input_required,
+                            message=new_agent_text_message(
+                                event['content'],
+                                task.contextId,
+                                task.id,
+                            ),
+                        ),
+                        final=True,
+                        contextId=task.contextId,
+                        taskId=task.id,
+                    )
+                )
+            else:
+                event_queue.enqueue_event(
+                    TaskStatusUpdateEvent(
+                        status=TaskStatus(
+                            state=TaskState.working,
+                            message=new_agent_text_message(
+                                event['content'],
+                                task.contextId,
+                                task.id,
+                            ),
+                        ),
+                        final=False,
+                        contextId=task.contextId,
+                        taskId=task.id,
+                    )
+                )
+
+    async def cancel(
+        self, context: RequestContext, event_queue: EventQueue
+    ) -> None:
+        raise Exception('cancel not supported')
+
+```
+
+我来分析这段代码的逻辑：
+这是一个名为 `CurrencyAgentExecutor` 的代理执行器类，主要用于处理货币相关的代理操作。让我详细分析其结构和功能：
+
+A2A 代理处理请求和生成响应/事件的核心逻辑由AgentExecutor。A2A Python SDK 提供了一个抽象基类 *a2a.server.agent_execution.AgentExecutor* ，你需要实现它。
+
+AgentExecutor 类定义了两个主要方法：
+- `async def execute(self, context: RequestContext, event_queue: EventQueue)`：处理需要响应或事件流的传入请求。它处理用户的输入（通过 context 获取）并使用 `event_queue` 发送 Message、Task、TaskStatusUpdateEvent 或 TaskArtifactUpdateEvent 对象。
+- `async def cancel(self, context: RequestContext, event_queue: EventQueue)`：处理取消正在进行的任务的请求。
+
+RequestContext 提供有关传入请求的信息，如用户的消息和任何现有的任务详情。EventQueue 由执行器用来向客户端发送事件。
+
+## 完成 AgentServer
+
+代码
+```python
+import os
+import sys
+
+import click
+import httpx
+
+from currency_agent import CurrencyAgent  # type: ignore[import-untyped]
+from agent_executor import CurrencyAgentExecutor  # type: ignore[import-untyped]
+from dotenv import load_dotenv
+
+from a2a.server.apps import A2AStarletteApplication
+from a2a.server.request_handlers import DefaultRequestHandler
+from a2a.server.tasks import InMemoryPushNotifier, InMemoryTaskStore
+from a2a.types import AgentCapabilities, AgentCard, AgentSkill
+
+
+load_dotenv()
+
+
+@click.command()
+@click.option('--host', 'host', default='localhost')
+@click.option('--port', 'port', default=10000)
+def main(host: str, port: int):
+
+    client = httpx.AsyncClient()
+    request_handler = DefaultRequestHandler(
+        agent_executor=CurrencyAgentExecutor(),
+        task_store=InMemoryTaskStore(),
+        push_notifier=InMemoryPushNotifier(client),
+    )
+
+    server = A2AStarletteApplication(
+        agent_card=get_agent_card(host, port), http_handler=request_handler
+    )
+    import uvicorn
+
+    uvicorn.run(server.build(), host=host, port=port)
+
+
+def get_agent_card(host: str, port: int):
+    """Returns the Agent Card for the Currency Agent."""
+    capabilities = AgentCapabilities(streaming=True, pushNotifications=True)
+    skill = AgentSkill(
+        id='convert_currency',
+        name='Currency Exchange Rates Tool',
+        description='Helps with exchange values between various currencies',
+        tags=['currency conversion', 'currency exchange'],
+        examples=['What is exchange rate between USD and GBP?'],
+    )
+    return AgentCard(
+        name='Currency Agent',
+        description='Helps with exchange rates for currencies',
+        url=f'http://{host}:{port}/',
+        version='1.0.0',
+        defaultInputModes=CurrencyAgent.SUPPORTED_CONTENT_TYPES,
+        defaultOutputModes=CurrencyAgent.SUPPORTED_CONTENT_TYPES,
+        capabilities=capabilities,
+        skills=[skill],
+    )
+
+
+if __name__ == '__main__':
+    main()
+
+
+```
+
+### AgentSkill
+AgentSkill描述了代理可以执行的特定能力或功能。它是一个构建块，告诉客户端代理适合执行哪些类型的任务。
+AgentSkill 的关键属性（在 a2a.types 中定义）：
+- id：技能的唯一标识符。
+- name：人类可读的名称。
+- description：对技能功能的更详细解释。
+- tags：用于分类和发现的关键词。
+- examples：示例提示或用例。
+- inputModes / outputModes：支持的输入和输出 MIME 类型（例如，"text/plain"，"application/json"）。
+
+
+这个技能非常简单：处理汇率转换，输入和输出都是 `text`, 在 AgentCard 中定义。
+### AgentCard
+AgentCard 是 A2A 服务器提供的 JSON 文档，通常位于 `.well-known/agent.json` 端点。它就像是代理的数字名片。
+AgentCard 的关键属性（在 a2a.types 中定义）：
+- name、description、version：基本身份信息。
+- url：可以访问 A2A 服务的端点。
+- capabilities：指定支持的 A2A 功能，如 streaming 或 pushNotifications。
+- defaultInputModes / defaultOutputModes：代理的默认 MIME 类型。
+- skills：代理提供的 AgentSkill 对象列表。
+
+### AgentServer
+
+- DefaultRequestHandler：
+SDK 提供了 DefaultRequestHandler。这个处理器接收 AgentExecutor 实现（这里是 CurrencyAgentExecutor）和一个 TaskStore（这里是 InMemoryTaskStore）。
+它将传入的 A2A RPC 调用路由到执行器上的适当方法（如 execute 或 cancel）。
+TaskStore 被 DefaultRequestHandler 用来管理任务的生命周期，特别是对于有状态交互、流式处理和重新订阅。
+即使AgentExecutor很简单，处理器也需要一个任务存储。
+
+- A2AStarletteApplication：
+A2AStarletteApplication 类使用 agent_card 和 request_handler（在其构造函数中称为 http_handler）进行实例化。
+agent_card 非常关键，因为服务器将默认在 `/.well-known/agent.json` 端点上公开它。
+request_handler 负责通过与您的 AgentExecutor 交互来处理所有传入的 A2A 方法调用。
+
+- uvicorn.run(server_app_builder.build(), ...)：
+A2AStarletteApplication 有一个 build() 方法，用于构建实际的 [Starlette](https://www.starlette.io/) 应用程序。
+然后使用 `uvicorn.run()` 运行此应用程序，使您的代理可通过 HTTP 访问。
+host='0.0.0.0' 使服务器在您机器上的所有网络接口上可访问。
+port=9999 指定要监听的端口。这与 AgentCard 中的 url 相匹配。
+
+## 运行
+
+### 运行 Server
+```bash
+uv run python main.py
+```
+输出：
+```bash
+INFO:     Started server process [70842]
+INFO:     Waiting for application startup.
+INFO:     Application startup complete.
+INFO:     Uvicorn running on http://localhost:10000 (Press CTRL+C to quit)
+```
+
+### 运行 Client
+client 代码如下
+```python
+from a2a.client import A2AClient
+from typing import Any
+from uuid import uuid4
+from a2a.types import (
+    SendMessageResponse,
+    GetTaskResponse,
+    SendMessageSuccessResponse,
+    Task,
+    TaskState,
+    SendMessageRequest,
+    MessageSendParams,
+    GetTaskRequest,
+    TaskQueryParams,
+    SendStreamingMessageRequest,
+)
+import httpx
+import traceback
+
+AGENT_URL = 'http://localhost:10000'
+
+
+def create_send_message_payload(
+    text: str, task_id: str | None = None, context_id: str | None = None
+) -> dict[str, Any]:
+    """Helper function to create the payload for sending a task."""
+    payload: dict[str, Any] = {
+        'message': {
+            'role': 'user',
+            'parts': [{'kind': 'text', 'text': text}],
+            'messageId': uuid4().hex,
+        },
+    }
+
+    if task_id:
+        payload['message']['taskId'] = task_id
+
+    if context_id:
+        payload['message']['contextId'] = context_id
+    return payload
+
+
+def print_json_response(response: Any, description: str) -> None:
+    """Helper function to print the JSON representation of a response."""
+    print(f'--- {description} ---')
+    if hasattr(response, 'root'):
+        print(f'{response.root.model_dump_json(exclude_none=True)}\n')
+    else:
+        print(f'{response.model_dump(mode="json", exclude_none=True)}\n')
+
+
+async def run_single_turn_test(client: A2AClient) -> None:
+    """Runs a single-turn non-streaming test."""
+
+    send_payload = create_send_message_payload(
+        text='how much is 100 USD in CAD?'
+    )
+    request = SendMessageRequest(params=MessageSendParams(**send_payload))
+
+    print('--- Single Turn Request ---')
+    # Send Message
+    send_response: SendMessageResponse = await client.send_message(request)
+    print_json_response(send_response, 'Single Turn Request Response')
+    if not isinstance(send_response.root, SendMessageSuccessResponse):
+        print('received non-success response. Aborting get task ')
+        return
+
+    if not isinstance(send_response.root.result, Task):
+        print('received non-task response. Aborting get task ')
+        return
+
+    task_id: str = send_response.root.result.id
+    print('---Query Task---')
+    # query the task
+    get_request = GetTaskRequest(params=TaskQueryParams(id=task_id))
+    get_response: GetTaskResponse = await client.get_task(get_request)
+    print_json_response(get_response, 'Query Task Response')
+
+
+async def run_streaming_test(client: A2AClient) -> None:
+    """Runs a single-turn streaming test."""
+
+    send_payload = create_send_message_payload(
+        text='how much is 50 EUR in JPY?'
+    )
+
+    request = SendStreamingMessageRequest(
+        params=MessageSendParams(**send_payload)
+    )
+
+    print('--- Single Turn Streaming Request ---')
+    stream_response = client.send_message_streaming(request)
+    async for chunk in stream_response:
+        print_json_response(chunk, 'Streaming Chunk')
+
+
+async def run_multi_turn_test(client: A2AClient) -> None:
+    """Runs a multi-turn non-streaming test."""
+    print('--- Multi-Turn Request ---')
+    # --- First Turn ---
+
+    first_turn_payload = create_send_message_payload(
+        text='how much is 100 USD?'
+    )
+    request1 = SendMessageRequest(
+        params=MessageSendParams(**first_turn_payload)
+    )
+    first_turn_response: SendMessageResponse = await client.send_message(
+        request1
+    )
+    print_json_response(first_turn_response, 'Multi-Turn: First Turn Response')
+
+    context_id: str | None = None
+    if isinstance(
+        first_turn_response.root, SendMessageSuccessResponse
+    ) and isinstance(first_turn_response.root.result, Task):
+        task: Task = first_turn_response.root.result
+        context_id = task.contextId  # Capture context ID
+
+        # --- Second Turn (if input required) ---
+        if task.status.state == TaskState.input_required and context_id:
+            print('--- Multi-Turn: Second Turn (Input Required) ---')
+            second_turn_payload = create_send_message_payload(
+                'in GBP', task.id, context_id
+            )
+            request2 = SendMessageRequest(
+                params=MessageSendParams(**second_turn_payload)
+            )
+            second_turn_response = await client.send_message(request2)
+            print_json_response(
+                second_turn_response, 'Multi-Turn: Second Turn Response'
+            )
+        elif not context_id:
+            print('Warning: Could not get context ID from first turn response.')
+        else:
+            print(
+                'First turn completed, no further input required for this test case.'
+            )
+
+
+async def main() -> None:
+    """Main function to run the tests."""
+    print(f'Connecting to agent at {AGENT_URL}...')
+    try:
+        async with httpx.AsyncClient(timeout=100) as httpx_client:
+            client = await A2AClient.get_client_from_agent_card_url(
+                httpx_client, AGENT_URL
+            )
+            print('Connection successful.')
+            await run_single_turn_test(client)
+            await run_streaming_test(client)
+            await run_multi_turn_test(client)
+
+    except Exception as e:
+        traceback.print_exc()
+        print(f'An error occurred: {e}')
+        print('Ensure the agent server is running.')
+
+
+if __name__ == '__main__':
+    import asyncio
+
+    asyncio.run(main())
+
+```
+
+运行如下：
+```bash
+uv run python test_client.py
+Connecting to agent at http://localhost:10000...
+Connection successful.
+--- Single Turn Request ---
+--- Single Turn Request Response ---
+{"id":"f403b867-1b98-466e-b6ae-e4506e41d02a","jsonrpc":"2.0","result":{"artifacts":[{"artifactId":"50edd29a-57e8-4c68-9eea-10d2127a954f","description":"Result of request to agent.","name":"current_result","parts":[{"kind":"text","text":"Based on the current exchange rate, 100 USD is equivalent to 139.52 CAD. This rate is as of 2025-05-20."}]}],"contextId":"9b70f49f-7e4e-495d-b90b-9aad39b2bdbe","history":[{"contextId":"9b70f49f-7e4e-495d-b90b-9aad39b2bdbe","kind":"message","messageId":"5a66747536d745378ccb914832ad0d30","parts":[{"kind":"text","text":"how much is 100 USD in CAD?"}],"role":"user","taskId":"8e471995-756f-4bc0-afff-b07f86d8c608"},{"contextId":"9b70f49f-7e4e-495d-b90b-9aad39b2bdbe","kind":"message","messageId":"f3f645af-158d-428d-887f-301a518d5150","parts":[{"kind":"text","text":"Looking up the exchange rates..."}],"role":"agent","taskId":"8e471995-756f-4bc0-afff-b07f86d8c608"},{"contextId":"9b70f49f-7e4e-495d-b90b-9aad39b2bdbe","kind":"message","messageId":"74c90f14-8e21-4ffc-9a46-c3cfec984620","parts":[{"kind":"text","text":"Processing the exchange rates..."}],"role":"agent","taskId":"8e471995-756f-4bc0-afff-b07f86d8c608"}],"id":"8e471995-756f-4bc0-afff-b07f86d8c608","kind":"task","status":{"state":"completed"}}}
+
+---Query Task---
+--- Query Task Response ---
+{"id":"f07d56ae-b998-4da5-bb6f-53f1edd7c315","jsonrpc":"2.0","result":{"artifacts":[{"artifactId":"50edd29a-57e8-4c68-9eea-10d2127a954f","description":"Result of request to agent.","name":"current_result","parts":[{"kind":"text","text":"Based on the current exchange rate, 100 USD is equivalent to 139.52 CAD. This rate is as of 2025-05-20."}]}],"contextId":"9b70f49f-7e4e-495d-b90b-9aad39b2bdbe","history":[{"contextId":"9b70f49f-7e4e-495d-b90b-9aad39b2bdbe","kind":"message","messageId":"5a66747536d745378ccb914832ad0d30","parts":[{"kind":"text","text":"how much is 100 USD in CAD?"}],"role":"user","taskId":"8e471995-756f-4bc0-afff-b07f86d8c608"},{"contextId":"9b70f49f-7e4e-495d-b90b-9aad39b2bdbe","kind":"message","messageId":"f3f645af-158d-428d-887f-301a518d5150","parts":[{"kind":"text","text":"Looking up the exchange rates..."}],"role":"agent","taskId":"8e471995-756f-4bc0-afff-b07f86d8c608"},{"contextId":"9b70f49f-7e4e-495d-b90b-9aad39b2bdbe","kind":"message","messageId":"74c90f14-8e21-4ffc-9a46-c3cfec984620","parts":[{"kind":"text","text":"Processing the exchange rates..."}],"role":"agent","taskId":"8e471995-756f-4bc0-afff-b07f86d8c608"}],"id":"8e471995-756f-4bc0-afff-b07f86d8c608","kind":"task","status":{"state":"completed"}}}
+
+--- Single Turn Streaming Request ---
+--- Streaming Chunk ---
+{"id":"06695ada-11e5-4bf5-8e5f-0e4731002def","jsonrpc":"2.0","result":{"contextId":"221722b1-5ee4-4a61-adb7-65c513f5c1aa","history":[{"contextId":"221722b1-5ee4-4a61-adb7-65c513f5c1aa","kind":"message","messageId":"dcc004a7af814b18b1a8868b1bd091be","parts":[{"kind":"text","text":"how much is 50 EUR in JPY?"}],"role":"user","taskId":"7c4c23c1-2652-4f68-a233-71dae8e84499"}],"id":"7c4c23c1-2652-4f68-a233-71dae8e84499","kind":"task","status":{"state":"submitted"}}}
+
+--- Streaming Chunk ---
+{"id":"06695ada-11e5-4bf5-8e5f-0e4731002def","jsonrpc":"2.0","result":{"contextId":"221722b1-5ee4-4a61-adb7-65c513f5c1aa","final":false,"kind":"status-update","status":{"message":{"contextId":"221722b1-5ee4-4a61-adb7-65c513f5c1aa","kind":"message","messageId":"7d799de0-9073-46c1-a300-4b4a25591145","parts":[{"kind":"text","text":"Looking up the exchange rates..."}],"role":"agent","taskId":"7c4c23c1-2652-4f68-a233-71dae8e84499"},"state":"working"},"taskId":"7c4c23c1-2652-4f68-a233-71dae8e84499"}}
+
+--- Streaming Chunk ---
+{"id":"06695ada-11e5-4bf5-8e5f-0e4731002def","jsonrpc":"2.0","result":{"contextId":"221722b1-5ee4-4a61-adb7-65c513f5c1aa","final":false,"kind":"status-update","status":{"message":{"contextId":"221722b1-5ee4-4a61-adb7-65c513f5c1aa","kind":"message","messageId":"b0d03a04-43d4-44fb-b1bd-b6321b960633","parts":[{"kind":"text","text":"Processing the exchange rates..."}],"role":"agent","taskId":"7c4c23c1-2652-4f68-a233-71dae8e84499"},"state":"working"},"taskId":"7c4c23c1-2652-4f68-a233-71dae8e84499"}}
+
+--- Streaming Chunk ---
+{"id":"06695ada-11e5-4bf5-8e5f-0e4731002def","jsonrpc":"2.0","result":{"append":false,"artifact":{"artifactId":"252c35db-8cca-4797-be24-6f3b57b4194b","description":"Result of request to agent.","name":"current_result","parts":[{"kind":"text","text":"50 EUR is equivalent to 8,129.50 JPY based on the current exchange rate (1 EUR = 162.59 JPY as of May 20, 2025)."}]},"contextId":"221722b1-5ee4-4a61-adb7-65c513f5c1aa","kind":"artifact-update","lastChunk":true,"taskId":"7c4c23c1-2652-4f68-a233-71dae8e84499"}}
+
+--- Streaming Chunk ---
+{"id":"06695ada-11e5-4bf5-8e5f-0e4731002def","jsonrpc":"2.0","result":{"contextId":"221722b1-5ee4-4a61-adb7-65c513f5c1aa","final":true,"kind":"status-update","status":{"state":"completed"},"taskId":"7c4c23c1-2652-4f68-a233-71dae8e84499"}}
+
+--- Multi-Turn Request ---
+--- Multi-Turn: First Turn Response ---
+{"id":"1fcb346b-4ba3-472d-938b-216c6e387e73","jsonrpc":"2.0","result":{"contextId":"136fcbf7-e696-4624-a772-8068091f72c8","history":[{"contextId":"136fcbf7-e696-4624-a772-8068091f72c8","kind":"message","messageId":"a6e95e1328594ebb9d01b8ec56dd7aaa","parts":[{"kind":"text","text":"how much is 100 USD?"}],"role":"user","taskId":"5011389c-3fba-4c81-b4c4-4c9e5d9d0a6b"}],"id":"5011389c-3fba-4c81-b4c4-4c9e5d9d0a6b","kind":"task","status":{"message":{"contextId":"136fcbf7-e696-4624-a772-8068091f72c8","kind":"message","messageId":"bc93f6be-f6a6-4f5e-88bd-861646e6d6bb","parts":[{"kind":"text","text":"To provide a currency conversion, I need to know which currency you want to convert USD to. Please specify the target currency. For example: 'How much is 100 USD in EUR?'"}],"role":"agent","taskId":"5011389c-3fba-4c81-b4c4-4c9e5d9d0a6b"},"state":"input-required"}}}
+
+--- Multi-Turn: Second Turn (Input Required) ---
+--- Multi-Turn: Second Turn Response ---
+{"id":"4907a948-7667-4177-a05d-49ddd4b30204","jsonrpc":"2.0","result":{"contextId":"136fcbf7-e696-4624-a772-8068091f72c8","history":[{"contextId":"136fcbf7-e696-4624-a772-8068091f72c8","kind":"message","messageId":"a6e95e1328594ebb9d01b8ec56dd7aaa","parts":[{"kind":"text","text":"how much is 100 USD?"}],"role":"user","taskId":"5011389c-3fba-4c81-b4c4-4c9e5d9d0a6b"},{"contextId":"136fcbf7-e696-4624-a772-8068091f72c8","kind":"message","messageId":"bc93f6be-f6a6-4f5e-88bd-861646e6d6bb","parts":[{"kind":"text","text":"To provide a currency conversion, I need to know which currency you want to convert USD to. Please specify the target currency. For example: 'How much is 100 USD in EUR?'"}],"role":"agent","taskId":"5011389c-3fba-4c81-b4c4-4c9e5d9d0a6b"},{"contextId":"136fcbf7-e696-4624-a772-8068091f72c8","kind":"message","messageId":"f343dd31d96b4f7a87d633b6f2cefaf0","parts":[{"kind":"text","text":"in GBP"}],"role":"user","taskId":"5011389c-3fba-4c81-b4c4-4c9e5d9d0a6b"},{"contextId":"136fcbf7-e696-4624-a772-8068091f72c8","kind":"message","messageId":"cff157b7-ecdd-4057-a2bf-c93168c37fd0","parts":[{"kind":"text","text":"Looking up the exchange rates..."}],"role":"agent","taskId":"5011389c-3fba-4c81-b4c4-4c9e5d9d0a6b"},{"contextId":"136fcbf7-e696-4624-a772-8068091f72c8","kind":"message","messageId":"ea6a5ffb-0106-4ba8-a68e-497d50718594","parts":[{"kind":"text","text":"Processing the exchange rates..."}],"role":"agent","taskId":"5011389c-3fba-4c81-b4c4-4c9e5d9d0a6b"}],"id":"5011389c-3fba-4c81-b4c4-4c9e5d9d0a6b","kind":"task","status":{"message":{"contextId":"136fcbf7-e696-4624-a772-8068091f72c8","kind":"message","messageId":"602a8178-ebd3-4447-ab50-53b487369737","parts":[{"kind":"text","text":"We are unable to process your request at the moment. Please try again."}],"role":"agent","taskId":"5011389c-3fba-4c81-b4c4-4c9e5d9d0a6b"},"state":"input-required"}}}
+```

@@ -176,3 +176,6 @@ Note: Return the response in the JSON format, only json is allowed.
                 "require_user_input": True,
                 "content": "Invalid response format from the model."
             } 
+    SUPPORTED_CONTENT_TYPES = ['text', 'text/plain']
+
+    
