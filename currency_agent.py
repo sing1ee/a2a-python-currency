@@ -103,7 +103,6 @@ Note: Return the response in the JSON format, only json is allowed.
         # Get response from OpenAI
         response = await self._call_openai(messages)
         assistant_message = response["choices"][0]["message"]["content"]
-        print(assistant_message)
         try:
             # Try to parse the response as JSON
             parsed_response = json.loads(assistant_message)
@@ -135,10 +134,16 @@ Note: Return the response in the JSON format, only json is allowed.
                         "role": "assistant",
                         "content": json.dumps({"tool_result": tool_result})
                     })
-                    
+                    # Add user message to request processing of tool result
+                    self.conversation_history.append({
+                        "role": "user",
+                        "content": "Please process the exchange rate information and provide a response."
+                    })
+                    messages = [{"role": "system", "content": self.SYSTEM_PROMPT}] + self.conversation_history
                     # Get final response after tool use
                     final_response = await self._call_openai(messages)
                     final_message = final_response["choices"][0]["message"]["content"]
+                    logger.info(f"Final message: {final_response["choices"][0]["message"]}")
                     parsed_response = json.loads(final_message)
 
             # Add assistant response to conversation history
