@@ -1,0 +1,12 @@
+.env
+.cache
+.cursorrules
+
+__pycache__
+.venv
+.pytest_cache
+.ruff_cache
+.mypy_cache
+.ruff_cache
+.mypy_cache
+

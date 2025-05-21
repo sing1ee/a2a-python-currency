@@ -1,0 +1,10 @@
+[project]
+name = "a2a-python-currency"
+version = "0.1.0"
+description = "Add your description here"
+readme = "README.md"
+requires-python = ">=3.13"
+dependencies = [
+    "a2a-sdk>=0.2.3",
+    "dotenv>=0.9.9",
+]
