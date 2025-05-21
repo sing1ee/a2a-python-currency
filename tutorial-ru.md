@@ -752,3 +752,5 @@ uv run python test_client.py
 ```
 
 Конец учебника. 
+
+[https://a2aprotocol.ai/blog/a2a-sdk-currency-agent-tutorial-ru](https://a2aprotocol.ai/blog/a2a-sdk-currency-agent-tutorial-ru)
