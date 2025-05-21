@@ -1,9 +1,9 @@
 
 # 使用 A2A Python SDK 实现 CurrencyAgent
-谷歌官方的[a2a-python](https://github.com/google/a2a-python) SDK最近频繁的更新，我们的教程也需要跟着更新，这篇文章，我们通过 a2a-python sdk的 0.2.3 版本，实现一个简单的CurrencyAgent。
+谷歌官方的[a2a-python](https://github.com/google/a2a-python) SDK最近频繁的更新，我们的教程也需要跟着更新，这篇文章，我们通过 a2a-python sdk的 `0.2.3` 版本，实现一个简单的CurrencyAgent。
 
 ## 源码
-项目的源码在[]，欢迎 star 。
+项目的源码在[a2a-python-currency](https://github.com/sing1ee/a2a-python-currency)，欢迎 star 。
 
 
 ## 准备
@@ -331,7 +331,7 @@ INFO:httpx:HTTP Request: POST https://openrouter.ai/api/v1/chat/completions "HTT
 INFO:__main__:Response: {'is_task_complete': True, 'require_user_input': False, 'content': "I'm sorry, but I can only assist with currency conversion and exchange rate queries. I cannot provide information about the weather or other unrelated topics. If you have any questions about currency exchange rates or conversions, I'd be happy to help with those."}
 ```
 
-## 完成 AgentExecutor
+## 实现 AgentExecutor
 ```python
 from currency_agent import CurrencyAgent  # type: ignore[import-untyped]
 
@@ -441,7 +441,7 @@ AgentExecutor 类定义了两个主要方法：
 
 RequestContext 提供有关传入请求的信息，如用户的消息和任何现有的任务详情。EventQueue 由执行器用来向客户端发送事件。
 
-## 完成 AgentServer
+## 实现 AgentServer
 
 代码
 ```python
